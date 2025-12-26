@@ -1,7 +1,6 @@
 #pragma once
 #include <string>
 #include <pqxx/pqxx>
-#include "globals.hpp"
 
 struct usertype {
     std::string name;

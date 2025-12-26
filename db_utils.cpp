@@ -1,13 +1,15 @@
 #include <iostream>
 #include <iomanip>
 #include <pqxx/pqxx>
-#include "utils.hpp"
-#include "db_utils.hpp"
+
 #include "globals.hpp"
+#include "db_utils.hpp"
+#include "cli_utils.hpp"
+#include "input_utils.hpp"
 
 using namespace std;
 
-void ConnectDB() {
+void ConnectDB() { //gotovo
     if (base.is_open()) {
         cout << "Connected to database: " << base.dbname() << endl;
     } else {
@@ -16,65 +18,144 @@ void ConnectDB() {
     }
 }
 
-pqxx::result SqlQuery(const std::string& query) {
+void DisconnectDB() { //gotovo
+    base.close();
+    if (!base.is_open()) {
+        cout << "Сonnection is closed." << endl;
+        cout << "=== Goodbye! ===" << endl;
+    }
+}
+
+pqxx::result SqlQuery(const std::string& query) { //gotovo
     pqxx::result res;
     try {
         pqxx::work txn(base);
         res = txn.exec(query);
         txn.commit();
     } catch (const exception& e) {
-        cerr << "===================================\n" << endl;
+        cerr << "|" << endl;
         cerr << "SQL Error: " << e.what() << endl;
-        cerr << "\n===================================" << endl;
+        cerr << "|" << endl;
     }
     return res;
 }
 
-void ShowOrders(bool a, bool m) {
-    ClearTerminal();
-    string Query = "SELECT o.id, dt.name AS type, device, fault, c.name AS client, total_price AS price, os.name AS status FROM orders o JOIN device_types dt ON o.type = dt.id JOIN clients c ON o.client_id = c.id JOIN order_statuses os ON o.status = os.id";
+
+void ShowOrders(bool a, bool m) { //gotovo
+    string head = "ORDERS";
+    string query =
+    "SELECT o.id, dt.name AS type, device, c.name AS client, total_price AS price, os.name AS status, u.name AS engineer "
+    "FROM orders o "
+    "JOIN device_types dt ON o.type = dt.id "
+    "JOIN clients c ON o.client_id = c.id "
+    "JOIN order_statuses os ON o.status = os.id "
+    "JOIN users u ON o.engineer_id = u.id";
     if (a) {
-        Query += " WHERE status!=7";
+        query += " WHERE status!=7";
+        head = "ACTIVE " + head;
     } else if (m) {
-        Query += " WHERE status!=7 AND engineer_id=" + active_user.id;
+        query += " WHERE status!=7 AND engineer_id=" + active_user.id;
+        head = "MY ACTIVE " + head;
     }
-    pqxx::result res = SqlQuery(Query + " ORDER BY id;");
+    pqxx::result res = SqlQuery(query + " ORDER BY id;");
 
-    vector<string> col_names;
-    for (pqxx::row_size_type i = 0; i < res.columns(); ++i) {
-        col_names.push_back(res.column_name(i));
-    }
-
-    if (res.empty()) {
-        cout << "The result is empty =(" << endl;
-    } else {
-        for (const auto& row : res) {
-            for (size_t col = 0; col < row.size(); ++col) {
-                cout << col_names[col] << ": " << row[col].as<string>() << endl;
-            }
-            cout << string(40, '-') << endl;
-        }
-
-        cout << "Rows: " << res.size() << endl;
-    }
+    EnterAltScreen();
+    string name = "========== " + head + " ==========";
+    PrintTable(res, true, name);
+    Confirm();
+    ExitAltScreen();
 }
 
-//добавить аналитику 5 запр
-void Stats() {
+void ShowOrder(string id) { //gotovo
+    string Query = "SELECT o.id, dt.name AS type, o.device, o.fault, "
+                   "o.view, c.name AS client_name, c.phone AS client_phone, "
+                   "en.name AS engineer, o.total_price, o.details_price, "
+                   "o.works, os.name AS status, o.comment "
+                   "FROM orders o "
+                   "JOIN device_types dt ON o.type = dt.id "
+                   "JOIN clients c ON o.client_id = c.id "
+                   "JOIN order_statuses os ON o.status = os.id "
+                   "LEFT JOIN users en ON o.engineer_id = en.id "
+                   "WHERE o.id=" + id;
+    pqxx::result res = SqlQuery(Query);
+
+    EnterAltScreen();
+    PrintCard(res);
+    cout << string(40, '-') << endl;
+    cout << "What do you want?" << endl;
+    cout << "1. Change status" << endl;
+    cout << "2. Add comment" << endl;
+    cout << "0. Exit" << endl;
+
+    int cmd = InputInt("Сhoice >", 0, 2);
+    
+    if (cmd == 1) {
+        pqxx::result statuses = SqlQuery("SELECT * FROM order_statuses");
+        PrintTable(statuses, false, "Available statuses:");
+
+        int selected_status = InputInt("Choice >", 0, statuses.size());
+        SqlQuery("UPDATE orders SET status=" + to_string(selected_status) + " WHERE id=" + id); 
+        cout << "Success!" << endl;
+        Confirm();
+    } else if (cmd == 2) {
+        pqxx::result available_comment = SqlQuery("SELECT comment FROM orders WHERE id=" + id);
+        string new_comment = InputLine("Comment >");
+        string final_comment = available_comment[0][0].as<string>() + "\n" + active_user.name + " [" + GetTime() + "] - " + new_comment;
+        
+        SqlQuery("UPDATE orders SET comment='" + final_comment + "' WHERE id=" + id);
+        cout << "Success!" << endl; 
+        Confirm();
+    }
+    ExitAltScreen();
+}
+
+void NewOrder() { //gotovo
+    EnterAltScreen();
+    cout << "========== CREATING ORDER ==========" << endl;
+    vector<string> order;
+
+    pqxx::result device_types = SqlQuery("SELECT * FROM device_types");
+    PrintTable(device_types, false, "Types:");
+    order.push_back(to_string(InputInt("Input Device Type >", 0, device_types.size())));
+
+    order.push_back(InputLine("Input Device name >"));
+    order.push_back(InputLine("Input Fault >"));
+    order.push_back(InputLine("Input View >"));
+    
+    
+    string phone = InputWord("Input Client Phone (without +7) >");
+    pqxx::result client = SqlQuery("SELECT id, name FROM clients WHERE phone='" + phone + "'");
+    if (client.empty()) {
+        string name = InputLine("Input Client Name >");
+        pqxx::result newclient = SqlQuery("INSERT INTO clients (name, phone) VALUES ('" + name + "', '" + phone + "') RETURNING id");
+        order.push_back(newclient[0][0].as<string>());
+    } else {
+        cout << "The client was found in the database!" << endl;
+        order.push_back(client[0][0].as<string>());
+    }
+
+    order.push_back(to_string(InputInt("Input Total Price >", 0, 999999)));
+    order.push_back(to_string(InputInt("Input Details Price >", 0, 999999)));
+    
+    string query = "INSERT INTO orders (type, device, fault, view, client_id, total_price, details_price, comment, works, status, engineer_id) "
+    "VALUES (" + order[0] + ", '" + order[1] + "', '" + order[2] + "', '" + order[3] + "', " + order[4] + ", " + order[5] + ", " + order[6] + ", '', '', 1, " + active_user.id + ')' +
+    "RETURNING id";
+    pqxx::result res_final = SqlQuery(query);
+    cout << "Order was created with id = " << res_final[0][0].as<string>() << "!" << endl;
+    Confirm();
+    ExitAltScreen();
+}
+
+void Stats() { //gotovo
+    EnterAltScreen();
     cout << "Select analytics:" << endl;
     cout << "1. Кол-во всех и закрытых заказов" << endl;
     cout << "2. Типы устройств и их кол-во среди всех" << endl;
     cout << "3. Выручка с закрытых заказов" << endl;
     cout << "4. Средняя стоимость заказов по инженерам" << endl;
     cout << "5. Топ клиентов по заказам и общая сумма" << endl;
-    int cmd;
-    cout << "   > ";
-    cin >> cmd;
-    cin.clear();
-    if (cmd < 0 || cmd > 5) {
-        cout << "Wrond command!" << endl;
-        return;
-    }
+
+    int cmd = InputInt("Сhoice >", 1, 5);
 
     string query;
     switch (cmd) {
@@ -123,248 +204,78 @@ void Stats() {
             break;
         }
     }
+    
     pqxx::result res = SqlQuery(query);
-    
-    if (res.empty()) {
-        cout << "The result is empty =(" << endl;
-    } else {
-        for (size_t c = 0; c < res.columns(); ++c) {
-            cout << res.column_name(c) << "\t";
-        }
-        cout << endl;
-
-        for (const auto& r : res) {
-            for (size_t c = 0; c < r.size(); ++c) {
-                cout << r[c].as<string>() << "\t";
-            }
-            cout << endl;
-        }
-    }
-    ClearCin();
+    string name = "========== RESULT ==========";
+    PrintTable(res, false, name);
+    Confirm();
+    ExitAltScreen();
 }
 
-void ShowOrder(string id) {
-    ClearTerminal();
-    string Query = "SELECT o.id, dt.name AS type, o.device, o.fault, "
-                   "o.view, c.name AS client_name, c.phone AS client_phone, "
-                   "en.name AS engineer, o.total_price, o.details_price, "
-                   "o.comment, o.works, os.name AS status "
-                   "FROM orders o "
-                   "JOIN device_types dt ON o.type = dt.id "
-                   "JOIN clients c ON o.client_id = c.id "
-                   "JOIN order_statuses os ON o.status = os.id "
-                   "LEFT JOIN users en ON o.engineer_id = en.id "
-                   "WHERE o.id=" + id;
-    pqxx::result res = SqlQuery(Query);
 
-    vector<string> col_names;
-    for (pqxx::row_size_type i = 0; i < res.columns(); ++i) {
-        col_names.push_back(res.column_name(i));
-    }
+void Authorize() { //gotovo
+    pqxx::result users = SqlQuery("SELECT id, name FROM users WHERE is_active=true ORDER BY id");
 
-    if (res.empty()) {
-        cout << "The result is empty =(" << endl;
-    } else {
-        const auto& row = res[0];
+    EnterAltScreen();
+    PrintTable(users, false, "Select user to authorize:");
+    
+    string user = InputWord("User >");
+    pqxx::result row = SqlQuery("SELECT name, pass_hash, is_engineer, is_admin FROM users WHERE id='" + user + "'");
+    if (!row.empty()) {
+        cout << "Selected user - " << row[0][0].as<string>() << endl;
 
-        for (size_t col = 0; col < row.size(); ++col) {
-            cout << col_names[col] << ": " << row[col].as<std::string>() << endl;
-        }
-        cout << string(40, '-') << endl;
-        cout << "What do you want?" << endl;
-        cout << "1. Change status" << endl;
-        cout << "2. Add comment" << endl;
-        cout << "0. Exit" << endl;
-        cout << "   >>> ";
-        int cmd;
-        cin >> cmd;
-        ClearCin();
-        if (cmd == 1) {
-            pqxx::result res1 = SqlQuery("SELECT * FROM order_statuses");
-            for (pqxx::row_size_type i = 0; i < res1.columns(); i++) {
-                cout << res1.column_name(i) << "\t";
-            }
-            cout << endl << string(40, '-') << endl;
+        cout << "Input password:" << endl;
+        string pass = InputWord("Pass >");
         
-            for (const auto& row : res1) {
-                for (const auto& field : row) {
-                    cout << field.as<string>() << "\t";
-                }
-                cout << endl;
-            }
-            int stat;
-            cout << "   Select> ";
-            cin >> stat;
-            if (stat < 0 || stat > res1.size()) {
-                cerr << "Wrong status ID!";
-                ClearCin();
-            } else {
-                SqlQuery("UPDATE orders SET status=" + to_string(stat) + " WHERE id=" + id); 
-                cout << "Success!" << endl;
-                ClearCin();
-            }
-        } else if (cmd == 2) {
-            pqxx::result res = SqlQuery("SELECT status FROM orders WHERE id=" + id);
-            string comm;
-            cout << "Write comment: ";
-            cin.clear();
-            getline(cin, comm);
-            if (!comm.empty()){
-                string newcomm = row["comment"].as<std::string>() + "\n" + active_user.name + " [" + get_time() + "] - " + comm;
-                try {
-                    SqlQuery("UPDATE orders SET comment='" + newcomm + "' WHERE id=" + id);
-                    cout << "Success!" << endl; 
-                } catch (const exception& e) {
-                    cerr << e.what() << endl;
-                }
-            }
-        } else {
-            return;
+        if (!(to_string(hash<string>{}(pass)) == to_string(row[0][1]))) {
+            cout << "Invalid password! Nice try, good luck, goodbye" << endl;
+            exit(1);
         }
+        
+        cout << endl << "Successful authorization!" << endl;
+        active_user.name = to_string(row[0][0]);
+        active_user.is_engineer = (to_string(row[0][2]) == "t");
+        active_user.is_admin = (to_string(row[0][3]) == "t");
+        active_user.id = (user);
     }
+    ExitAltScreen();
 }
 
-void NewOrder() {
-    ClearTerminal;
-    cout << "Creating order:" << endl;
-    vector<string> order;
-    string value;
-
-    pqxx::result res1 = SqlQuery("SELECT * FROM device_types");
-    for (pqxx::row_size_type i = 0; i < res1.columns(); i++) {
-        cout << res1.column_name(i) << "\t";
-    }
-    cout << endl << string(40, '-') << endl;
-
-    for (const auto& row : res1) {
-        for (const auto& field : row) {
-            cout << field.as<string>() << "\t";
-        }
-        cout << endl;
-    }
-    int stat;
-    cout << "Input Device type > ";
-    cin >> stat;
-    if (stat < 0 || stat > res1.size()) {
-        cout << "Invalid type. Seted 0." << endl;
-        order.push_back("0");
-    } else {
-        order.push_back(to_string(stat));
-    }
-    cin.clear();
-    cin.ignore(256, '\n');
-    cout << "Input Device name > ";
-    getline(cin,value);
-    order.push_back(value);
-    cout << "Input Fault > ";
-    getline(cin,value);
-    order.push_back(value);
-    cout << "Input View > ";
-    getline(cin,value);
-    order.push_back(value);
-    cout << "Input Client Phone (without +7) > ";
-    getline(cin,value);
-    pqxx::result res = SqlQuery("SELECT id, name FROM clients WHERE phone='" + value + "'");
-    if (res.empty()) {
-        cout << "Input Client Name > ";
-        string name;
-        getline (cin, name);
-        pqxx::result res2 = SqlQuery("INSERT INTO clients (name, phone) VALUES ('" + name + "', '" + value + "') RETURNING id");
-        order.push_back(res2[0][0].as<string>());
-    } else {
-        cout << "The client was found in the database!" << endl;
-        order.push_back(res[0][0].as<string>());
-    }
-    cout << "Input Total Price > ";
-    getline(cin,value);
-    order.push_back(value);
-    cout << "Input Details Price > ";
-    getline(cin,value);
-    order.push_back(value);
-    
-    string Query = "INSERT INTO orders (type, device, fault, view, client_id, total_price, details_price, comment, works, status, engineer_id) "
-    "VALUES (" + order[0] + ", '" + order[1] + "', '" + order[2] + "', '" + order[3] + "', " + order[4] + ", " + order[5] + ", " + order[6] + ", '', '', 1, " + active_user.id + ')' +
-    "RETURNING id";
-    try {
-        pqxx::result res_final = SqlQuery(Query);
-        cout << "Order was created with id = " << res_final[0][0].as<string>() << "!" << endl;
-    } catch (const exception& e) {
-        cerr << e.what() << endl;
-    }
-}
-
-void SqlMode() {
+void SqlMode() { //gotovo
     if (!active_user.is_admin) {
         cout << "Sorry, You don't have rights to use it." << endl;
         return;
     }
+
+    EnterAltScreen();
     cout << "=== ENABLED SQL MODE ===" << endl;
     cout << "Warning: Using sql mode may be dangerous!" << endl;
     cout << "/exit | /quit - Disable SQL mode" << endl;
     
     while (true) {
-        cout << "   SQL>>> ";
-        string sql_req;
-        getline(cin, sql_req);
+        string query = InputLine("SQL>>>");
 
-        if (ToUpper(sql_req) == "/EXIT" || ToUpper(sql_req) == "/QUIT" ) {
+        if (ToUpper(query) == "/EXIT" || ToUpper(query) == "/QUIT" ) {
             break;
         }
         
-        if (sql_req.empty()) continue;
+        if (query.empty()) continue;
 
         try {
-            pqxx::result res = SqlQuery(sql_req);
+            pqxx::result res = SqlQuery(query);
             
             if (res.empty()) {
                 cout << "Query OK, 0 rows returned" << endl;
             } else {
-                for (pqxx::row_size_type i = 0; i < res.columns(); ++i) {
-                    cout << res.column_name(i) << "\t";
-                }
-                cout << endl << string(40, '-') << endl;
-            
-                for (const auto& row : res) {
-                    for (const auto& field : row) {
-                        cout << field.as<string>() << "\t";
-                    }
-                    cout << endl;
-                }
-                cout << "Rows: " << res.size() << endl;
+                PrintTable(res, true, "Result:");
             }
+
         } catch (const exception& e) {
-            cerr << "===================================\n" << endl;
+            cerr << "|" << endl;
             cerr << "SQL Error: " << e.what() << endl;
-            cerr << "\n===================================" << endl;
+            cerr << "|" << endl;
         }
     }
     cout << "SQL mode disabled." << endl;
-}
-
-void Authorize() {
-    pqxx::result res = SqlQuery("SELECT id, name FROM users WHERE is_active=true ORDER BY id");
-
-    cout << "Select user to authorize:" << endl;
-    for (int i = 0; i < res.size(); i++) {
-        cout << res[i][0] << " - " << res[i][1] << endl;
-    }
-    string user, pass;
-
-    cout << "   User > ";
-    cin >> user;
-    pqxx::result row = SqlQuery("SELECT name, pass_hash, is_engineer, is_admin FROM users WHERE id='" + user + "'");
-    cout << "Selected user - " << row[0][0] << endl;
-    cout << "Input password:" << endl;
-    cout << "   Pass > ";
-    cin >> pass;
-    if (!(to_string(std::hash<string>{}(pass)) == to_string(row[0][1]))) {
-        cout << "Invalid password! Nice try, good luck, goodbye" << endl;
-        exit(1);
-    }
-    ClearCin();
-    cout << endl << "Successful authorization!" << endl;
-    active_user.name = to_string(row[0][0]);
-    active_user.is_engineer = (to_string(row[0][2]) == "t");
-    active_user.is_admin = (to_string(row[0][3]) == "t");
-    active_user.id = (user);
+    ExitAltScreen();
 }
